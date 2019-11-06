@@ -1,15 +1,7 @@
 package io.confluent.firehose;
 
-import java.io.IOException;
-
-import org.apache.commons.configuration2.BaseConfiguration;
-import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import com.fasterxml.jackson.core.JsonParseException;
-
-import io.prometheus.client.Gauge;
 
 public class PrometheusPusherTest {
 	private static final Logger LOG = LoggerFactory.getLogger(PrometheusPusherTest.class);
@@ -34,13 +26,6 @@ public class PrometheusPusherTest {
 			"  }\n" + 
 			"}\n";
 
-	@Test
-	public void testJsonParse() throws JsonParseException, IOException {
-		final PrometheusPusher pusher = new PrometheusPusher(new BaseConfiguration());
-		
-		Gauge.Builder builder = pusher.parseMetricToGauge(jsonSample1.getBytes());
-		
-		LOG.info("Builder: {}", builder);
-	}
+
 
 }

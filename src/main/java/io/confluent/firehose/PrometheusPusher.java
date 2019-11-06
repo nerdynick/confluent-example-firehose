@@ -4,9 +4,17 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
-import java.util.Set;
+import java.util.Timer;
+import java.util.TimerTask;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
 
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.CommandLineParser;
@@ -25,23 +33,25 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.clients.consumer.OffsetCommitCallback;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.fasterxml.jackson.core.JsonFactory;
-import com.fasterxml.jackson.core.JsonParseException;
-import com.fasterxml.jackson.core.JsonParser;
-import com.fasterxml.jackson.core.JsonToken;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.module.afterburner.AfterburnerModule;
 import com.google.common.base.Splitter;
 import com.google.common.base.Splitter.MapSplitter;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.Lists;
 
 import io.confluent.config.ConfigUtils;
 import io.prometheus.client.CollectorRegistry;
 import io.prometheus.client.Gauge;
-import io.prometheus.client.Gauge.Builder;
 import io.prometheus.client.exporter.PushGateway;
 
 public class PrometheusPusher implements Closeable {
@@ -56,11 +66,14 @@ public class PrometheusPusher implements Closeable {
 
 	public static final Options options = new Options();
 	public static final Configuration Defaults;
+	
+	private static final ObjectMapper objectMapper = new ObjectMapper();
 
 	static {
 		options.addOption("c", "config", true, "Comma Seperated key=value pairs of configs");
 		options.addOption("f", "config-file", true, "Configs from a file");
 		options.addOption("g", "gateway", true, "Prometheus PushGateway URL");
+		options.addOption("j", "job", true, "Prometheus PushGateway Job Name");
 		options.addOption("h", "help", false, "Print Help");
 
 		Defaults = new BaseConfiguration();
@@ -78,13 +91,22 @@ public class PrometheusPusher implements Closeable {
 		Defaults.addProperty(CONSUMER_PREFIX + "." + ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG, 20000);
 		Defaults.addProperty(CONSUMER_PREFIX + "." + ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, 6000);
 		Defaults.addProperty(CONSUMER_PREFIX + "." + ConsumerConfig.FETCH_MIN_BYTES_CONFIG, 16000);
+		Defaults.addProperty(CONSUMER_PREFIX + "." + ConsumerConfig.RETRY_BACKOFF_MS_CONFIG, 500);
+		
+		
+		//Setup Jackson
+		objectMapper.registerModule(new AfterburnerModule());
 	}
 
 	private final Configuration config;
 	private Consumer<byte[], byte[]> consumer;
 	private Thread consumerThread;
 	private final AtomicBoolean stop = new AtomicBoolean(false);
-	private final JsonFactory factory = new JsonFactory();
+	private final Cache<String, Gauge> gauges = CacheBuilder.newBuilder()
+		       .maximumSize(1000)
+		       .expireAfterWrite(10, TimeUnit.MINUTES)
+		       .build();
+	
 
 	private PushGateway gateway;
 
@@ -94,18 +116,13 @@ public class PrometheusPusher implements Closeable {
 
 	public void start() {
 		final Map<String, Object> consumerConfigs = ConfigUtils.toMap(config.subset(CONSUMER_PREFIX));
-		LOG.info("Consumer Configuration:");
-		ConfigUtils.printProperties(consumerConfigs, (k, v) -> {
-			LOG.info(String.format("\t%-60s = %s", k, v));
-		});
-		
 		consumer = new KafkaConsumer<>(consumerConfigs, new ByteArrayDeserializer(), new ByteArrayDeserializer());
 		consumer.subscribe(Lists.newArrayList(config.getString(CONFIG_TOPIC, "metrics.v1")));
+		
+		gateway = new PushGateway(config.getString(CONFIG_PROM_GATEWAY));
 
 		consumerThread = new Thread(new ConsumerRunnable(), "KafkaConsumerThread");
 		consumerThread.start();
-
-		gateway = new PushGateway(config.getString(CONFIG_PROM_GATEWAY));
 	}
 
 	public void attach() throws InterruptedException {
@@ -123,44 +140,41 @@ public class PrometheusPusher implements Closeable {
 		}
 	}
 	
-	protected Gauge.Builder parseMetricToGauge(byte[] value) throws JsonParseException, IOException {
+	protected Callable<Gauge> createGauge(final FirehoseMetric metric, final CollectorRegistry registry) {
+		return ()->{
+			return Gauge.build()
+				.name(metric.name)
+				.namespace(metric.component)
+				.labelNames(metric.labelsAsArray())
+				.register(registry);
+		};
+	}
+	
+	protected FirehoseMetric parseMetric(byte[] metricJsonBytes) throws IOException {
+		return objectMapper.readValue(metricJsonBytes, FirehoseMetric.class);
+	}
+	
+	protected void handleMetric(byte[] value, final CollectorRegistry registry) throws IOException, ExecutionException{
 		if(LOG.isDebugEnabled()) {
 			LOG.debug("Parsing JSON: {}", new String(value));
 		}
 		
-		final JsonParser parser = factory.createParser(value);
-		final Builder gBuilder = Gauge.build();
-		while(parser.nextToken() != JsonToken.END_OBJECT) {
-			final String tok = parser.getCurrentName();
-			
-			if("name".equals(tok)) {
-				gBuilder.name(parser.nextTextValue());
-				
-				if(LOG.isDebugEnabled()) {
-					LOG.debug("Got Name: {}", parser.getText());
-				}
-			} else if("tags".equals(tok)) {
-				parser.nextToken();
-				LOG.debug("Parsing Tags");
-				final Map<String, String> labels = new HashMap<>();
-				while(parser.nextToken() != JsonToken.END_OBJECT) {
-					LOG.debug("Sub Token: {}", parser.getCurrentName());
-					String tagName = parser.getCurrentName();
-					String tagValue = parser.nextTextValue();
-					labels.put(tagName, tagValue);
-				}
-				LOG.debug("Tags/Labels: {}", labels);
-				final Set<String> labelNames = labels.keySet();
-				gBuilder.labelNames(labelNames.toArray(new String[labelNames.size()]));
-			}
-		}
+		final FirehoseMetric metric = parseMetric(value);
+		LOG.debug("Metrics: {}", metric);
 		
-		return gBuilder;
+		final Gauge g = gauges.get(metric.name, this.createGauge(metric, registry));
+		if(metric.labelValues().isEmpty()) {
+			g.set(metric.value);
+		} else {
+			g.labels(metric.labelValuesAsArray())
+				.set(metric.value);
+		}
 	}
 
 	private class ConsumerRunnable implements Runnable {
 		private final CollectorRegistry registry = new CollectorRegistry();
 		private final String jobName = config.getString(CONFIG_PROM_JOB, CONFIG_PROM_JOB_DEFAULT);
+		private final Map<TopicPartition, OffsetAndMetadata> commitQueue = new ConcurrentHashMap<>();
 		
 		@Override
 		public void run() {
@@ -169,16 +183,18 @@ public class PrometheusPusher implements Closeable {
 					ConsumerRecords<byte[], byte[]> records = consumer.poll(Duration.ofSeconds(60));
 					for(ConsumerRecord<byte[], byte[]> rec: records) {
 						try {
-							Gauge g = parseMetricToGauge(rec.value()).register(registry);
-						} catch (IOException e) {
+							handleMetric(rec.value(), registry);
+						} catch (IOException | ExecutionException e) {
 							LOG.error("Failed to parse message", e);
 						}
 					}
+					
 					try {
 						gateway.pushAdd(registry, jobName);
 					} catch (IOException e) {
 						LOG.error("Failed to push to gateway", e);
 					}
+					consumer.commitAsync();
 				}
 			} catch (WakeupException e) {
 				LOG.info("Consumer wokeup, checking if I should stop");
@@ -189,6 +205,121 @@ public class PrometheusPusher implements Closeable {
 				LOG.warn("Stopping/Closing Consumer");
 				consumer.close();
 			}
+		}
+		
+		/*
+		 * The bellow code is a sample (and Untested) approach to committing offsets
+		 * in a controlled manor leveraging CallableFutures, with threads post KafkaConsumer.
+		 */
+		
+		
+		public void _run() {
+			final Timer timer = new Timer(true);
+	        timer.scheduleAtFixedRate(new TimerTask() {
+				@Override
+				public void run() {
+					commitOffsets();
+				}
+	        }, 0, 10*1000);
+			try {
+		        
+				while (!stop.get()) {
+					ConsumerRecords<byte[], byte[]> records = consumer.poll(Duration.ofSeconds(60));
+					for(TopicPartition partition: records.partitions()){
+						final List<ConsumerRecord<byte[], byte[]>> recs = records.records(partition);
+						handleBundle(partition, recs)
+							.thenApply((offset)->{
+								//This runs after we've parsed all the data and done work with it.
+								//In this case we want to publish to the Prometheus gateway
+								try {
+									gateway.pushAdd(registry, jobName);
+								} catch (IOException e) {
+									LOG.error("Failed to push to gateway", e);
+								}
+								return offset;
+							})
+							.whenComplete((offset,error)->{
+								if(error != null) {
+									//TODO: Handle Error
+									LOG.error("Failed to handle partition batch", error);
+								} else {
+									LOG.info("Adding Offset to Commit Queue");
+									commitQueue.compute(partition, (k,v)->{
+										if(v == null) {
+											return offset;
+										} else {
+											if(v.offset() <= offset.offset()) {
+												return v;
+											} else {
+												return offset;
+											}
+										}
+									});
+								}
+							});
+					}
+					
+					LOG.info("Pausing for: {}", records.partitions());
+					consumer.pause(records.partitions());
+					
+				}
+			} catch (WakeupException e) {
+				LOG.info("Consumer wokeup, checking if I should stop");
+				// Ignore exception if closing
+				if (!stop.get())
+					throw e;
+			} finally {
+				timer.cancel();
+				commitOffsets();
+				LOG.warn("Stopping/Closing Consumer");
+				consumer.close();
+			}
+		}
+		
+		private void commitOffsets() {
+			LOG.debug("Startig commit");
+			final Map<TopicPartition, OffsetAndMetadata> commit = new HashMap<>();
+			
+			commitQueue.replaceAll((topic,offset)->{
+				commit.put(topic, offset);
+				return null;
+			});
+			
+			LOG.debug("Commiting: {}", commit);
+			
+			consumer.commitAsync(commit, new OffsetCommitCallback() {
+				@Override
+				public void onComplete(Map<TopicPartition, OffsetAndMetadata> offsets, Exception exception) {
+					if(exception != null) {
+						//TODO: Handle commit exception
+						LOG.error("Failed to commit offsets", exception);
+					} else {
+						LOG.info("Resuming for: {}", offsets.keySet());
+						consumer.resume(offsets.keySet());
+					}
+				}
+			});
+		}
+		
+		public CompletableFuture<OffsetAndMetadata> handleBundle(TopicPartition partition, List<ConsumerRecord<byte[], byte[]>> records) {
+			return CompletableFuture.supplyAsync(new Supplier<OffsetAndMetadata>(){
+				@Override
+				public OffsetAndMetadata get() {
+					long offset = 0;
+					for(ConsumerRecord<byte[], byte[]> rec: records) {
+						if(rec.offset() > offset) {
+							offset = rec.offset();
+						}
+						try {
+							handleMetric(rec.value(), registry);
+						} catch (IOException | ExecutionException e) {
+							LOG.error("Failed to parse message", e);
+						}
+					}
+					
+					return new OffsetAndMetadata(offset);
+				}
+			});
 		}
 
 	}
@@ -229,6 +360,14 @@ public class PrometheusPusher implements Closeable {
 					printHelp();
 					System.exit(1);
 				}
+			}
+			
+			if(line.hasOption('g')) {
+				configs.addProperty(CONFIG_PROM_GATEWAY, line.getOptionValue('g'));
+			}
+			
+			if(line.hasOption('j')) {
+				configs.addProperty(CONFIG_PROM_JOB, line.getOptionValue('j'));
 			}
 
 			LOG.info("PrometheusPusher Configuration:");
