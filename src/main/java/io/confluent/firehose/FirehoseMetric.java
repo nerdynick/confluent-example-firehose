@@ -6,6 +6,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 public class FirehoseMetric {
 	public static Set<String> FilteredTags = new HashSet<>();
 	
@@ -18,12 +20,46 @@ public class FirehoseMetric {
 	public String component;
 	public Map<String, String> tags;
 	public double value;
+	
 	public Window window;
 
 	public class Window {
+		@JsonProperty("from")
 		long from;
+		@JsonProperty("to")
 		long to;
+		@JsonProperty("interval")
 		int interval;
+		
+		@Override
+		public String toString() {
+			StringBuilder builder = new StringBuilder();
+			builder.append("{")
+				.append(this.from)
+				.append(" to ")
+				.append(this.to)
+				.append(" at ")
+				.append(this.interval)
+				.append("}");
+			return builder.toString();
+		}
+	}
+	
+	@Override
+	public String toString() {
+		StringBuilder builder = new StringBuilder();
+		builder.append(this.getClass().getSimpleName())
+			.append("{")
+			.append("id=").append(this.id)
+			.append(" name=").append(this.name)
+			.append(" component=").append(this.component)
+			.append(" timestamp=").append(this.timestamp)
+			.append(" value=").append(this.value)
+			.append(" window=").append(this.window)
+			.append(" tags=").append(this.tags)
+			.append("}");
+		
+		return builder.toString();
 	}
 	
 	private List<String> _labels = null;

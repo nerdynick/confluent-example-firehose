@@ -3,3 +3,5 @@
 .settings
 **/target
 **/*.properties
+*.tar.gz
+dependency-reduced-pom.xml

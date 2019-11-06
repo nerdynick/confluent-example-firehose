@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.BiConsumer;
 
+import org.apache.commons.configuration2.BaseConfiguration;
 import org.apache.commons.configuration2.Configuration;
 import org.apache.commons.configuration2.FileBasedConfiguration;
 import org.apache.commons.configuration2.INIConfiguration;
@@ -118,5 +119,28 @@ public class ConfigUtils {
 		}
 		
 		return mapConfig;
+	}
+	
+	/**
+	 * Reads all properties starting with {prefix} from {configToParse}. 
+	 * Properties that match prefix will have the prefix removed, key lowercased, and all `_` replaced with `.`
+	 * The general idea is to support Docker Containers.
+	 * 
+	 * @param configToParse
+	 * @param prefix
+	 * @return
+	 */
+	public static Configuration envToProp(final Configuration configToParse, final String prefix) {
+		final Iterator<String> envIter = configToParse.getKeys();
+		final Configuration config = new BaseConfiguration();
+		while(envIter.hasNext()) {
+			final String key = envIter.next();
+			if(key.startsWith(prefix)) {
+				final String prop = key.substring(prefix.length()).toLowerCase().replaceAll("_", ".");
+				config.addProperty(prop, configToParse.getProperty(key));
+			}
+		}
+		
+		return config;
 	}
 }

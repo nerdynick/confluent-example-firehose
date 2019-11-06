@@ -1,6 +1,7 @@
 package io.confluent.firehose;
 
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.util.Map;
 
 import org.apache.commons.cli.CommandLine;
@@ -21,42 +22,52 @@ import com.google.common.base.Splitter;
 import com.google.common.base.Splitter.MapSplitter;
 
 import io.confluent.config.ConfigUtils;
-import io.prometheus.client.exporter.PushGateway;
+import io.prometheus.client.exporter.HTTPServer;
 
-public class PrometheusPusher extends AbstractPrometheusFirehose {
-	private static final Logger LOG = LoggerFactory.getLogger(PrometheusPusher.class);
-
-	public static final String CONFIG_PROM_JOB_DEFAULT = PrometheusPusher.class.getSimpleName();
-
+public class PrometheusPuller extends AbstractPrometheusFirehose {
+	private static final Logger LOG = LoggerFactory.getLogger(PrometheusPuller.class);
 	public static final Options options = new Options();
 	static {
 		options.addOption("c", "config", true, "Comma Seperated key=value pairs of configs");
 		options.addOption("f", "config-file", true, "Configs from a file");
-		options.addOption("g", "gateway", true, "Prometheus PushGateway URL");
-		options.addOption("j", "job", true, "Prometheus PushGateway Job Name");
 		options.addOption("h", "help", false, "Print Help");
 	}
 	
-	private PushGateway gateway;
-	private String jobName;
+	protected HTTPServer server;
 
-	protected PrometheusPusher(Configuration config) {
+	protected PrometheusPuller(Configuration config) {
 		super(config);
-		jobName = config.getString(Configs.CONFIG_PROM_GATEWAY_JOB, CONFIG_PROM_JOB_DEFAULT);
 	}
 	
 	@Override
 	public void start() {
-		gateway = new PushGateway(config.getString(Configs.CONFIG_PROM_GATEWAY));
+		try {
+			
+			final String listener = config.getString(Configs.CONFIG_PROM_PULLER_LISTENER);
+			final String[] parts = listener.split(":");
+			LOG.info("Starting Prometheus Webapp on {}", listener);
+			final InetSocketAddress address = new InetSocketAddress(parts[0], Integer.parseInt(parts[1]));
+			server = new HTTPServer(address, this.registry);
+		} catch (IOException e) {
+			LOG.error("Failed to start Prometheus Web App", e);
+			printHelp();
+			System.exit(1);
+		}
+		
 		super.start();
 	}
+	
 	@Override
-	protected void endOfSet() throws Exception{
-		try {
-			gateway.pushAdd(this.registry, jobName);
-		} catch (IOException e) {
-			LOG.error("Failed to push to gateway", e);
+	public void close() throws IOException {
+		super.close();
+		if(server != null) {
+			server.stop();
 		}
+	}
+
+	@Override
+	protected void endOfSet() throws Exception {
+		
 	}
 	
 	protected static void printHelp() {
@@ -81,7 +92,6 @@ public class PrometheusPusher extends AbstractPrometheusFirehose {
 			configs.addConfiguration(new SystemConfiguration());
 			configs.addConfiguration(ConfigUtils.envToProp(envConfig, Configs.ENV_PROPERTIES_PREFIX));
 			configs.addConfiguration(envConfig);
-			configs.addConfiguration(Configs.PrometheusGatewayDefaults);
 			configs.addConfiguration(Configs.ConsumerDefaults);
 
 			if (line.hasOption('f')) {
@@ -100,24 +110,13 @@ public class PrometheusPusher extends AbstractPrometheusFirehose {
 					System.exit(1);
 				}
 			}
-			
-			if(line.hasOption('g')) {
-				configs.addProperty(Configs.CONFIG_PROM_GATEWAY, line.getOptionValue('g'));
-			}
-			
-			if(line.hasOption('j')) {
-				configs.addProperty(Configs.CONFIG_PROM_GATEWAY_JOB, line.getOptionValue('j'));
-				
-				//Optionally also set the Consumer Group ID if it hasn't been done so
-				configs.addProperty(Configs.CONFIG_CONSUMER_GROUP_ID, configs.getString(Configs.CONFIG_CONSUMER_GROUP_ID, line.getOptionValue('j')));
-			}
 
-			LOG.info("PrometheusPusher Configuration:");
+			LOG.info("Application Configuration:");
 			ConfigUtils.printProperties(configs, (k, v) -> {
 				LOG.info(String.format("\t%-60s = %s", k, v));
 			});
 
-			final PrometheusPusher pusher = new PrometheusPusher(configs);
+			final PrometheusPuller pusher = new PrometheusPuller(configs);
 
 			Runtime.getRuntime().addShutdownHook(new Thread() {
 				@Override
@@ -133,7 +132,7 @@ public class PrometheusPusher extends AbstractPrometheusFirehose {
 				}
 			});
 
-			LOG.info("Starting Pusher");
+			LOG.info("Starting...");
 			pusher.start();
 			pusher.attach();
 		} catch (ParseException exp) {
@@ -143,4 +142,5 @@ public class PrometheusPusher extends AbstractPrometheusFirehose {
 			System.exit(1);
 		}
 	}
+
 }
