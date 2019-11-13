@@ -45,7 +45,7 @@ public abstract class AbstractPrometheusFirehose extends AbstractFirehose {
 			g.set(metric.value);
 		} else {
 			LOG.debug("Updating Child Metric: {}", metric);
-			g.labels(metric.labelValuesAsArray())
+			g.labels(LookupMapper.Lookup(metric.labelsAsArray(), metric.labelValuesAsArray()))
 				.set(metric.value);
 		}
 	}
