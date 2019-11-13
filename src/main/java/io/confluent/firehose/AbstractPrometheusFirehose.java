@@ -9,6 +9,8 @@ import org.slf4j.LoggerFactory;
 
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
+import com.google.common.cache.RemovalListener;
+import com.google.common.cache.RemovalNotification;
 
 import io.prometheus.client.CollectorRegistry;
 import io.prometheus.client.Gauge;
@@ -16,9 +18,16 @@ import io.prometheus.client.Gauge;
 public abstract class AbstractPrometheusFirehose extends AbstractFirehose {
 	protected final CollectorRegistry registry = new CollectorRegistry();
 	private final Cache<String, Gauge> gauges = CacheBuilder.newBuilder()
-		       .maximumSize(1000)
-		       .expireAfterWrite(10, TimeUnit.MINUTES)
-		       .build();
+					.initialCapacity(1000)
+					.maximumSize(10000)
+					.expireAfterAccess(10, TimeUnit.MINUTES)
+					.removalListener(new RemovalListener<String, Gauge>() {
+						@Override
+						public void onRemoval(RemovalNotification<String, Gauge> notification) {
+							registry.unregister(notification.getValue());
+						}
+					})
+					.build();
 	
 	private final Logger LOG;
 	
