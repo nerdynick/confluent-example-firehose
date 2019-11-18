@@ -24,6 +24,13 @@ import com.google.common.base.Splitter.MapSplitter;
 import io.confluent.config.ConfigUtils;
 import io.prometheus.client.exporter.HTTPServer;
 
+/**
+ * Sample Implementation that exposes the Confluent Cloud Metrics Firehose to Prometheus 
+ * using the default Pull based methodology. 
+ * 
+ * @author Nikoleta Verbeck
+ *
+ */
 public class PrometheusPuller extends AbstractPrometheusFirehose {
 	private static final Logger LOG = LoggerFactory.getLogger(PrometheusPuller.class);
 	public static final Options options = new Options();

@@ -33,6 +33,12 @@ import com.google.common.collect.Lists;
 
 import io.confluent.config.ConfigUtils;
 
+/**
+ * Abstract class to handle Consuming from the Confluent Cloud Metrics Firehose
+ *  
+ * @author Nikoleta Verbeck
+ *
+ */
 public abstract class AbstractFirehose implements Closeable {
 	private static final ObjectMapper objectMapper = new ObjectMapper();
 	
@@ -54,6 +60,10 @@ public abstract class AbstractFirehose implements Closeable {
 		LOG = LoggerFactory.getLogger(this.getClass()+"."+AbstractFirehose.class.getSimpleName());
 	}
 	
+	/**
+	 * Start KafkConsumer and Thread (KafkaConsumerThread to handle consuming records.
+	 * Call attach() right after to attache the Main Thread to the Consumer Thread.
+	 */
 	public void start() {
 		final Map<String, Object> consumerConfigs = ConfigUtils.toMap(config.subset(Configs.CONSUMER_PREFIX));
 		consumer = new KafkaConsumer<>(consumerConfigs, new ByteArrayDeserializer(), new ByteArrayDeserializer());
@@ -63,12 +73,19 @@ public abstract class AbstractFirehose implements Closeable {
 		consumerThread.start();
 	}
 	
+	/**
+	 * Attaches current thread to the KafkaConsumer Thread.
+	 * @throws InterruptedException
+	 */
 	public void attach() throws InterruptedException {
 		if (consumerThread != null && consumerThread.isAlive()) {
 			consumerThread.join();
 		}
 	}
 
+	/**
+	 * Trigger shutdown and close of KafkaConsumer and it's Consumer Thread
+	 */
 	@Override
 	public void close() throws IOException {
 		LOG.warn("Recieved Close. Stoping everything.");

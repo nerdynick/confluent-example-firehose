@@ -23,6 +23,13 @@ import com.google.common.base.Splitter.MapSplitter;
 import io.confluent.config.ConfigUtils;
 import io.prometheus.client.exporter.PushGateway;
 
+/**
+ * Sample Implementation that exposes the Confluent Cloud Metrics Firehose to Prometheus 
+ * using the Prometheus Push Gateway 
+ * 
+ * @author Nikoleta Verbeck
+ *
+ */
 public class PrometheusPusher extends AbstractPrometheusFirehose {
 	private static final Logger LOG = LoggerFactory.getLogger(PrometheusPusher.class);
 
