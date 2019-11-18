@@ -1,10 +1,10 @@
-= Sample Confluent Cloud Metrics Firehose to Prometheus Application
+# Sample Confluent Cloud Metrics Firehose to Prometheus Application
 
 This sample application has 2 build-in execution models, the `PrometheusPuller` and the `PrometheusPusher`.
 Together each of these application builds will either leverage the Prometheus Push Gateway, `PrometheusPusher`,
 or will leverage the traditional pull based model, `PrometheusPuller`.
 
-== Building
+## Building
 
 Each application version has a given Maven Profile to build Uber Jars with Manafest with MainClass definitions.
 
